@@ -10,15 +10,12 @@ import {
   UserRound,
   QrCode as QrIcon,
   ScanLine,
-  Smartphone,
 } from "lucide-react"
 import { ScreenShell } from "@/components/screen-shell"
 import { AppFooterTag } from "@/components/app-footer-tag"
 import { QrScanner } from "@/components/qr-scanner"
 import { useRoster, setStudentName, type Student } from "@/lib/roster"
 import { recordCheckin } from "@/lib/checkins"
-import { readCurrentPosition, distanceMeters, GeoError } from "@/lib/geo"
-import { claimDeviceLock, lockedRollFor } from "@/lib/device-id"
 import { getLiveSession, verifySessionToken, type ParsedToken } from "@/lib/live-session"
 
 type Phase = "idle" | "verifying" | "verified"
@@ -38,7 +35,7 @@ export function StudentCheckinScreen({ onBack }: { onBack: () => void }) {
   const [scanning, setScanning] = useState(false)
   const [token, setToken] = useState<ParsedToken | null>(null)
   const [manualCode, setManualCode] = useState("")
-  const [distance, setDistance] = useState<number | null>(null)
+  const [syncWarning, setSyncWarning] = useState<string | null>(null)
 
   const selected = roster.find((s) => s.roll === roll) ?? null
 
@@ -93,37 +90,23 @@ export function StudentCheckinScreen({ onBack }: { onBack: () => void }) {
       return
     }
 
-    // Device lock: one phone can only ever mark one roll number per session.
-    const locked = lockedRollFor(token.sessionId)
-    if (locked && locked !== roll) {
-      setError(`This device already checked in roll #${locked} for this session.`)
-      return
-    }
-
+    // Geofencing, GPS distance, and device-lock checks are intentionally skipped —
+    // check-in is no longer blocked by location or device restrictions. Only the
+    // session QR/code (token) is still required, since that's not a location/device check.
     setError(null)
+    setSyncWarning(null)
     setPhase("verifying")
     try {
-      const pos = await readCurrentPosition()
-      const meters = distanceMeters(pos, token.origin)
-      setDistance(Math.round(meters))
-      if (meters > token.radiusM) {
-        setPhase("idle")
-        setError(
-          `You're about ${Math.round(meters)} m from the classroom — check-in only works within ${token.radiusM} m.`,
-        )
-        return
-      }
-      if (!claimDeviceLock(token.sessionId, roll)) {
-        setPhase("idle")
-        setError("This device is already bound to another student for this session.")
-        return
-      }
       setStudentName(roll, fullName.trim())
-      recordCheckin(roll, "PRESENT")
+ await recordCheckin(roll, "PRESENT")
       setPhase("verified")
     } catch (err) {
+      // recordCheckin() writes to local state synchronously and fires the Supabase
+      // insert in the background, so this only catches unexpected local errors.
+      // Supabase-specific errors are logged (and can be surfaced) from checkins.ts.
+      console.error("Check-in failed:", err)
       setPhase("idle")
-      setError(err instanceof GeoError ? err.message : "Location check failed. Please try again.")
+      setError("Something went wrong marking you present. Please try again.")
     }
   }
 
@@ -133,8 +116,8 @@ export function StudentCheckinScreen({ onBack }: { onBack: () => void }) {
     setFullName("")
     setRollQuery("")
     setToken(null)
-    setDistance(null)
     setError(null)
+    setSyncWarning(null)
   }
 
   return (
@@ -155,9 +138,12 @@ export function StudentCheckinScreen({ onBack }: { onBack: () => void }) {
         <div className="mt-5 rounded-3xl bg-white p-7 text-center shadow-[0_14px_34px_-20px_rgba(15,23,42,0.5)] ring-1 ring-emerald-100">
           <CheckCircle2 className="mx-auto h-12 w-12 text-emerald-500" />
           <p className="mt-4 text-[18px] font-bold text-slate-900">You're marked present</p>
-          <p className="mt-1 text-sm text-slate-400">
-            Roll #{roll} · verified {distance !== null ? `${distance} m` : ""} from the classroom centre.
-          </p>
+          <p className="mt-1 text-sm text-slate-400">Roll #{roll} has been marked present.</p>
+          {syncWarning ? (
+            <p className="mt-3 rounded-2xl bg-amber-50 px-4 py-2.5 text-xs font-semibold text-amber-700 ring-1 ring-amber-100">
+              {syncWarning}
+            </p>
+          ) : null}
           <div className="mt-6 flex gap-3">
             <button
               type="button"
@@ -343,7 +329,7 @@ export function StudentCheckinScreen({ onBack }: { onBack: () => void }) {
             {phase === "verifying" ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin" />
-                Verifying location…
+                Marking present…
               </>
             ) : (
               <>
@@ -357,15 +343,10 @@ export function StudentCheckinScreen({ onBack }: { onBack: () => void }) {
           <div className="mt-5 rounded-3xl bg-white p-4 ring-1 ring-slate-100">
             <p className="flex items-center gap-2 text-[15px] font-bold text-slate-800">
               <ShieldCheck className="h-4 w-4 text-emerald-600" />
-              Live anti-cheat protection
+              Check-in protection
             </p>
             <ul className="mt-2 flex flex-col gap-1.5 text-sm leading-relaxed text-slate-400">
               <li>· QR tokens rotate every few seconds and expire after 15s.</li>
-              <li>· GPS must place you inside the CR's classroom radius.</li>
-              <li className="flex items-start gap-1.5">
-                <Smartphone className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                One device can mark only one roll number per session.
-              </li>
               <li>· Your CR can override any entry before locking attendance.</li>
             </ul>
           </div>

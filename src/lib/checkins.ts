@@ -1,85 +1,66 @@
-import { useSyncExternalStore } from "react"
-import type { AttendanceStatus } from "@/lib/attendance-history"
+import { useState, useEffect } from "react"
+import { supabase } from "./supabase"
 
-/**
- * Pending student self check-ins for the current class.
- * Keyed by roll number ("01".."80"). Consumed by the live session screen,
- * which pre-marks those students, and cleared when a session is finalized.
- */
-export type CheckinMap = Record<string, AttendanceStatus>
+export type AttendanceStatus = "PRESENT" | "ABSENT"
 
-const STORAGE_KEY = "campusroll.checkins.v1"
-
-let checkins: CheckinMap = {}
+let checkins: Record<string, AttendanceStatus> = {}
 let hydrated = false
 const listeners = new Set<() => void>()
 
-function emit() {
-  for (const l of listeners) l()
+function hydrate() {
+  if (typeof window === "undefined") return
+  try {
+    const raw = localStorage.getItem("campusroll_checkins")
+    if (raw) checkins = JSON.parse(raw)
+  } catch (e) {
+    console.error(e)
+  }
+  hydrated = true
 }
 
 function persist() {
   if (typeof window === "undefined") return
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(checkins))
-  } catch {
-    // storage unavailable — keep in-memory state
+    localStorage.setItem("campusroll_checkins", JSON.stringify(checkins))
+  } catch (e) {
+    console.error(e)
   }
 }
 
-function hydrate() {
-  if (hydrated || typeof window === "undefined") return
-  hydrated = true
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY)
-    if (raw) {
-      const parsed = JSON.parse(raw) as unknown
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const next: CheckinMap = {}
-        for (const [roll, status] of Object.entries(parsed as Record<string, unknown>)) {
-          if (status === "PRESENT" || status === "ABSENT" || status === "LATE") next[roll] = status
-        }
-        checkins = next
-      }
-    }
-  } catch {
-    checkins = {}
-  }
+function emit() {
+  listeners.forEach((fn) => fn())
 }
 
-function subscribe(cb: () => void) {
-  if (!hydrated) {
-    hydrate()
-    emit()
-  }
-  listeners.add(cb)
-  const onStorage = (e: StorageEvent) => {
-    if (e.key === STORAGE_KEY) {
-      hydrated = false
-      hydrate()
-      emit()
-    }
-  }
-  window.addEventListener("storage", onStorage)
-  return () => {
-    listeners.delete(cb)
-    window.removeEventListener("storage", onStorage)
-  }
-}
-
-function getSnapshot() {
-  return checkins
-}
-
-function getServerSnapshot() {
-  return checkins
-}
-
-export function recordCheckin(roll: string, status: AttendanceStatus = "PRESENT") {
+export function recordCheckin(
+  roll: string,
+  status: AttendanceStatus = "PRESENT",
+  onError?: (message: string) => void,
+) {
   if (!hydrated) hydrate()
   checkins = { ...checkins, [roll]: status }
   persist()
   emit()
+
+  supabase
+    .from("attendance")
+    .insert([
+      {
+        student_id: roll,
+        student_name: roll,
+        subject: "General",
+        marked_at: new Date().toISOString(),
+      },
+    ])
+    .then(({ error }) => {
+      if (error) {
+        console.error("Supabase Error:", error.message)
+        // The local check-in already succeeded (it's persisted to localStorage above),
+        // so this only warns that the record hasn't synced to Supabase yet.
+        onError?.(error.message)
+      } else {
+        console.log(`Roll ${roll} saved to Supabase!`)
+      }
+    })
 }
 
 export function clearCheckins() {
@@ -88,6 +69,28 @@ export function clearCheckins() {
   emit()
 }
 
+export function getCheckins(): Record<string, AttendanceStatus> {
+  if (!hydrated) hydrate()
+  return checkins
+}
+
+export function subscribeCheckins(fn: () => void) {
+  listeners.add(fn)
+  return () => {
+    listeners.delete(fn)
+  }
+}
+
+// React Custom Hook (Jo live-session-screen.tsx mang raha tha)
 export function useCheckins() {
-  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
+  const [data, setData] = useState<Record<string, AttendanceStatus>>(() => getCheckins())
+
+  useEffect(() => {
+    const unsubscribe = subscribeCheckins(() => {
+      setData({ ...getCheckins() })
+    })
+    return () => unsubscribe()
+  }, [])
+
+  return data
 }
