@@ -7,8 +7,7 @@ CampusRoll is an offline-first attendance management application for classroom c
 - Create and manage live attendance sessions
 - QR code check-in with short-lived session tokens
 - Location-aware check-in and single-device safeguards
-- Attendance history, analytics, and status updates
-- Export attendance data as CSV, Excel, and PDF
+- Attendance history, analytics, and status updates- Export attendance data as CSV, Docx, Excel, and PDF
 - Offline browser storage for roster, sessions, and notes
 - Built-in help panel for common check-in and export questions
 
